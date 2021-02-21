@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+region=eu-central-1
+az=c
+rolename=CWL1
+amz_ami_id=ami-0a6dc7529cd559185
+
+aws --region $region cloudformation delete-stack --stack-name SysLogAlarm
+vpc_id=`aws --region $region ec2 describe-vpcs --filters Name=isDefault,Values=true --query 'Vpcs[*].VpcId' --output text`
+subnet_id=`aws --region $region ec2 describe-subnets --filters Name=availability-zone,Values=$region$az | jq '.Subnets[].SubnetId' -r`
+
+aws --region $region cloudformation create-stack --stack-name SysLogAlarm --template-body file://$PWD/WANDownDetector.yaml \
+--capabilities CAPABILITY_NAMED_IAM \
+--parameters ParameterKey=KeyName,ParameterValue=berlin\
+ ParameterKey=DeployVpcId,ParameterValue=$vpc_id\
+ ParameterKey=DeployRoleName,ParameterValue=$rolename\
+ ParameterKey=AvailabilityZone,ParameterValue=$az\
+ ParameterKey=SubnetId,ParameterValue=$subnet_id\
+ ParameterKey=AMZNLinuxAMIId,ParameterValue=$amz_ami_id
+

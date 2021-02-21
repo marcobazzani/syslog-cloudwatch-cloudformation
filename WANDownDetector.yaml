@@ -1,0 +1,211 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Vector Syslog to CloudWatch Log to monitor Ewan ppp connection up/down"
+Parameters:
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: 'AWS::EC2::KeyPair::KeyName'
+    ConstraintDescription: must be the name of an existing EC2 KeyPair.
+  SysLogWanDown:
+    Description: Basename
+    Type: String
+    Default: SysLog_Wan_Down
+  DeployRoleName:
+    Description: role name for CloudWatchLogsWriteAccess
+    Type: String
+  DeployVpcId:
+    Description: Vpc ID to deploy
+    Type: String
+  AvailabilityZone:
+    Description: AvailabilityZone (a,b,c)
+    Type: String
+  SubnetId:
+    Description: Subnet Id
+    Type: String
+  AMZNLinuxAMIId:
+    Description: Amazon Linux Ami ID
+    Type: String
+    
+
+Resources:
+    AutoScalingAutoScalingGroup:
+        Type: "AWS::AutoScaling::AutoScalingGroup"
+        Properties:
+            AutoScalingGroupName: "SyslogVector"
+            LaunchTemplate: 
+                LaunchTemplateId: !Ref EC2LaunchTemplate
+                Version: !GetAtt EC2LaunchTemplate.LatestVersionNumber
+            MinSize: 0
+            MaxSize: 1
+            DesiredCapacity: 0
+            Cooldown: 300
+            AvailabilityZones: 
+              - !Sub "${AWS::Region}${AvailabilityZone}"
+            HealthCheckType: "EC2"
+            HealthCheckGracePeriod: 300
+            VPCZoneIdentifier: 
+              - !Ref SubnetId
+            TerminationPolicies: 
+              - "Default"
+            ServiceLinkedRoleARN: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling"
+            NewInstancesProtectedFromScaleIn: false
+        DependsOn: 
+          - EC2LaunchTemplate
+    EC2LaunchTemplate:
+        Type: "AWS::EC2::LaunchTemplate"
+        Properties:
+            LaunchTemplateName: "vector-syslog"
+            LaunchTemplateData: 
+                UserData: 
+                  Fn::Base64: >-
+                    yum update -y
+                    curl --proto '=https' --tlsv1.2 -sSf https://sh.vector.dev -o vector.sh
+                    chmod +x vector.sh
+                    ./vector.sh -y
+                    cat <<-'VECTORCFG' > /tmp/vector.toml
+                    [sources.syslog]
+                    type = "syslog"
+                    address = "0.0.0.0:9000"
+                    mode = "udp"
+                    path = "/path/to/socket"
+
+                    [sinks.out]
+                    type = "aws_cloudwatch_logs"
+                    inputs = [ "syslog" ]
+                    group_name = "home-network"
+                    region = "eu-south-1"
+                    stream_name = "vector"
+                    encoding.codec = "json"
+                    VECTORCFG
+
+                    vector --config /tmp/vector.toml
+                InstanceInitiatedShutdownBehavior: "terminate"
+                IamInstanceProfile: 
+                    Arn: !GetAtt IAMInstanceProfile.Arn
+                EbsOptimized: false
+                DisableApiTermination: false
+                NetworkInterfaces: 
+                  - 
+                    AssociatePublicIpAddress: true
+                    DeleteOnTermination: true
+                    DeviceIndex: 0
+                    Groups: 
+                      - !Ref EC2SecurityGroup
+                ImageId: !Ref AMZNLinuxAMIId
+                InstanceType: "t3.micro"
+                Monitoring: 
+                    Enabled: false
+
+    EC2SecurityGroup:
+        Type: "AWS::EC2::SecurityGroup"
+        Properties:
+            GroupDescription: "TCP/UDP 9000 with SSH"
+            GroupName: "sec-group-1"
+            VpcId: !Ref DeployVpcId
+            SecurityGroupIngress: 
+              - 
+                CidrIp: "0.0.0.0/0"
+                FromPort: 9000
+                IpProtocol: "tcp"
+                ToPort: 9000
+              - 
+                CidrIp: "0.0.0.0/0"
+                FromPort: 22
+                IpProtocol: "tcp"
+                ToPort: 22
+              - 
+                CidrIp: "0.0.0.0/0"
+                FromPort: 9000
+                IpProtocol: "udp"
+                ToPort: 9000
+            SecurityGroupEgress: 
+              - 
+                CidrIp: "0.0.0.0/0"
+                IpProtocol: "-1"
+    SNSTopic:
+        Type: "AWS::SNS::Topic"
+        Properties:
+            DisplayName: ""
+            TopicName: !Ref SysLogWanDown
+
+    SNSTopicPolicy:
+        Type: "AWS::SNS::TopicPolicy"
+        Properties:
+            PolicyDocument: !Sub "{\"Version\":\"2008-10-17\",\"Id\":\"__default_policy_ID\",\"Statement\":[{\"Sid\":\"__default_statement_ID\",\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"*\"},\"Action\":[\"SNS:GetTopicAttributes\",\"SNS:SetTopicAttributes\",\"SNS:AddPermission\",\"SNS:RemovePermission\",\"SNS:DeleteTopic\",\"SNS:Subscribe\",\"SNS:ListSubscriptionsByTopic\",\"SNS:Publish\",\"SNS:Receive\"],\"Resource\":\"${SNSTopic}\",\"Condition\":{\"StringEquals\":{\"AWS:SourceOwner\":\"${AWS::AccountId}\"}}}]}"
+            Topics: 
+              - !Ref SNSTopic
+
+    SNSSubscription:
+        Type: "AWS::SNS::Subscription"
+        Properties:
+            TopicArn: !Ref SNSTopic
+            Endpoint: "ma.bazzani@gmail.com"
+            Protocol: "email"
+            Region: !Ref AWS::Region
+
+    IAMRole:
+        Type: "AWS::IAM::Role"
+        Properties:
+            Path: "/"
+            RoleName: !Ref DeployRoleName
+            AssumeRolePolicyDocument: "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}"
+            MaxSessionDuration: 3600
+            ManagedPolicyArns: 
+              - "arn:aws:iam::aws:policy/CloudWatchLogsFullAccess"
+            Description: "Allows EC2 instances to call AWS services on your behalf."
+
+    IAMInstanceProfile:
+        Type: "AWS::IAM::InstanceProfile"
+        Properties:
+            Path: "/"
+            InstanceProfileName: !Ref IAMRole
+            Roles: 
+              - !Ref IAMRole
+
+    CloudWatchAlarm:
+        Type: "AWS::CloudWatch::Alarm"
+        Properties:
+            AlarmName: "WAN DOWN"
+            ActionsEnabled: true
+            AlarmActions: 
+              - !Ref SNSTopic
+            MetricName: "STATUS_WAN"
+            Namespace: "Syslog"
+            Statistic: "Maximum"
+            Period: 60
+            EvaluationPeriods: 1
+            DatapointsToAlarm: 1
+            Threshold: 0
+            ComparisonOperator: "GreaterThanThreshold"
+            TreatMissingData: "ignore"
+
+    LogsLogGroup:
+        Type: "AWS::Logs::LogGroup"
+        Properties:
+            LogGroupName: "home-network"
+            RetentionInDays: 7
+
+    LogsMetricFilterUp:
+        Type: "AWS::Logs::MetricFilter"
+        Properties:
+            FilterPattern: "Ewan ppp connection up"
+            LogGroupName: "home-network"
+            MetricTransformations: 
+              - 
+                MetricName: "STATUS_WAN"
+                MetricNamespace: "Syslog"
+                MetricValue: "0"
+        DependsOn:
+          - LogsLogGroup
+    LogsMetricFilterDown:
+        Type: "AWS::Logs::MetricFilter"
+        Properties:
+            FilterPattern: "Ewan ppp connection down"
+            LogGroupName: "home-network"
+            MetricTransformations: 
+              - 
+                MetricName: "STATUS_WAN"
+                MetricNamespace: "Syslog"
+                MetricValue: "1"
+        DependsOn:
+          - LogsLogGroup
+
