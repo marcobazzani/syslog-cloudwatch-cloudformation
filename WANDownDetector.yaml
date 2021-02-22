@@ -36,7 +36,7 @@ Resources:
                 Version: !GetAtt EC2LaunchTemplate.LatestVersionNumber
             MinSize: 0
             MaxSize: 1
-            DesiredCapacity: 0
+            DesiredCapacity: 1
             Cooldown: 300
             AvailabilityZones: 
               - !Sub "${AWS::Region}${AvailabilityZone}"
