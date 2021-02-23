@@ -23,7 +23,12 @@ Parameters:
     Type: String
   AMZNLinuxAMIId:
     Description: Amazon Linux Ami ID
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+  LogGroupName:
+    Description: LogGroupName
     Type: String
+    Default: home-network-1
     
 
 Resources:
@@ -36,7 +41,7 @@ Resources:
                 Version: !GetAtt EC2LaunchTemplate.LatestVersionNumber
             MinSize: 0
             MaxSize: 1
-            DesiredCapacity: 0
+            DesiredCapacity: 1
             Cooldown: 300
             AvailabilityZones: 
               - !Sub "${AWS::Region}${AvailabilityZone}"
@@ -56,7 +61,8 @@ Resources:
             LaunchTemplateName: "vector-syslog"
             LaunchTemplateData: 
                 UserData: 
-                  Fn::Base64: >-
+                  Fn::Base64: !Sub |
+                    #!/bin/bash -xe
                     yum update -y
                     curl --proto '=https' --tlsv1.2 -sSf https://sh.vector.dev -o vector.sh
                     chmod +x vector.sh
@@ -71,7 +77,7 @@ Resources:
                     [sinks.out]
                     type = "aws_cloudwatch_logs"
                     inputs = [ "syslog" ]
-                    group_name = "home-network"
+                    group_name = ${LogGroupName} 
                     region = "eu-south-1"
                     stream_name = "vector"
                     encoding.codec = "json"
@@ -94,6 +100,74 @@ Resources:
                 InstanceType: "t3.micro"
                 Monitoring: 
                     Enabled: false
+
+    ElasticLoadBalancingV2LoadBalancer:
+        Type: "AWS::ElasticLoadBalancingV2::LoadBalancer"
+        Properties:
+            Name: "SysLog"
+            Scheme: "internet-facing"
+            Type: "network"
+            Subnets: 
+              - !Ref SubnetId
+            IpAddressType: "ipv4"
+            LoadBalancerAttributes: 
+              - 
+                Key: "access_logs.s3.enabled"
+                Value: "false"
+              - 
+                Key: "deletion_protection.enabled"
+                Value: "false"
+              - 
+                Key: "load_balancing.cross_zone.enabled"
+                Value: "false"
+
+    ElasticLoadBalancingV2Listener:
+        Type: "AWS::ElasticLoadBalancingV2::Listener"
+        Properties:
+            LoadBalancerArn: !Ref ElasticLoadBalancingV2LoadBalancer
+            Port: 9000
+            Protocol: "TCP_UDP"
+            DefaultActions: 
+              - 
+                TargetGroupArn: !Ref ElasticLoadBalancingV2TargetGroup
+                Type: "forward"
+
+    ElasticLoadBalancingV2TargetGroup:
+        Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+        Properties:
+            HealthCheckIntervalSeconds: 30
+            Port: 9000
+            Protocol: "TCP_UDP"
+            HealthCheckPort: "traffic-port"
+            HealthCheckProtocol: "TCP"
+            HealthCheckTimeoutSeconds: 10
+            UnhealthyThresholdCount: 3
+            TargetType: "instance"
+            HealthyThresholdCount: 3
+            VpcId: !Ref DeployVpcId
+            Name: "Vector"
+            HealthCheckEnabled: true
+            TargetGroupAttributes: 
+              - 
+                Key: "proxy_protocol_v2.enabled"
+                Value: "false"
+              - 
+                Key: "preserve_client_ip.enabled"
+                Value: "true"
+              - 
+                Key: "stickiness.enabled"
+                Value: "false"
+              - 
+                Key: "deregistration_delay.timeout_seconds"
+                Value: "300"
+              - 
+                Key: "stickiness.type"
+                Value: "source_ip"
+              - 
+                Key: "deregistration_delay.connection_termination.enabled"
+                Value: "false"
+
+
 
     EC2SecurityGroup:
         Type: "AWS::EC2::SecurityGroup"
@@ -164,11 +238,11 @@ Resources:
     CloudWatchAlarm:
         Type: "AWS::CloudWatch::Alarm"
         Properties:
-            AlarmName: "WAN DOWN"
+            AlarmName: "WAN_DOWN"
             ActionsEnabled: true
             AlarmActions: 
               - !Ref SNSTopic
-            MetricName: "STATUS_WAN"
+            MetricName: "STATUS_WAN_1"
             Namespace: "Syslog"
             Statistic: "Maximum"
             Period: 60
@@ -181,17 +255,17 @@ Resources:
     LogsLogGroup:
         Type: "AWS::Logs::LogGroup"
         Properties:
-            LogGroupName: "home-network"
+            LogGroupName: !Ref LogGroupName
             RetentionInDays: 7
 
     LogsMetricFilterUp:
         Type: "AWS::Logs::MetricFilter"
         Properties:
             FilterPattern: "Ewan ppp connection up"
-            LogGroupName: "home-network"
+            LogGroupName: !Ref LogGroupName
             MetricTransformations: 
               - 
-                MetricName: "STATUS_WAN"
+                MetricName: "STATUS_WAN_1"
                 MetricNamespace: "Syslog"
                 MetricValue: "0"
         DependsOn:
@@ -200,10 +274,10 @@ Resources:
         Type: "AWS::Logs::MetricFilter"
         Properties:
             FilterPattern: "Ewan ppp connection down"
-            LogGroupName: "home-network"
+            LogGroupName: !Ref LogGroupName
             MetricTransformations: 
               - 
-                MetricName: "STATUS_WAN"
+                MetricName: "STATUS_WAN_1"
                 MetricNamespace: "Syslog"
                 MetricValue: "1"
         DependsOn:
