@@ -2,7 +2,6 @@
 region=eu-south-1
 az=c
 rolename=CWL1
-#amz_ami_id=ami-0a6dc7529cd559185
 key_name=milano
 
 aws --region $region cloudformation delete-stack --stack-name SysLogAlarm
